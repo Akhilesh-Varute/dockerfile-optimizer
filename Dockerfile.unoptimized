@@ -1,0 +1,43 @@
+# Base image with no specific version
+FROM ubuntu
+
+# Run as root by default
+# Install packages without cleanup
+RUN apt-get update && apt-get install -y \
+    python3 \
+    python3-pip \
+    curl \
+    wget \
+    nodejs \
+    npm
+
+# Install vulnerable package version
+RUN pip3 install flask==0.12.3 requests==2.18.0
+
+# Copy entire directory (no .dockerignore)
+COPY . /app
+
+# Set insecure permissions
+RUN chmod -R 777 /app
+
+# Use ADD instead of COPY for local files
+ADD config.json /app/config.json
+
+# Expose a commonly targeted port
+EXPOSE 22 80 8080
+
+# Set working directory after copying files
+WORKDIR /app
+
+# Install dependencies with no version pinning
+RUN pip3 install -r requirements.txt
+
+# Use environment variables with sensitive information
+ENV DB_PASSWORD=supersecretpassword
+ENV API_KEY=sk_test_12345
+
+# No specific user - will run as root
+# No healthcheck configured
+
+# Run with no CMD validation
+CMD ["python3", "app.py"]
