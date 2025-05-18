@@ -1,0 +1,7 @@
+# Auto-generated Dockerignore
+**/node_modules
+**/__pycache__
+*.log
+.git
+.env
+Dockerfile.dev
