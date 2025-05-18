@@ -25,5 +25,5 @@ This project uses Google’s Gemini AI model to automatically analyze your Docke
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/dockerfile-optimizer.git
+[git clone URL here](https://github.com/Akhilesh-Varute/dockerfile-optimizer.git)
 cd dockerfile-optimizer
