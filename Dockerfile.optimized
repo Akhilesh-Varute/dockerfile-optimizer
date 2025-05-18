@@ -1,0 +1,60 @@
+
+# ARG for environment selection
+ARG ENV=development
+
+# Stage 1: Build
+FROM ubuntu:22.04 AS builder
+
+# Create non-root user
+RUN groupadd --gid 1001 appuser && useradd --uid 1001 --gid appuser --shell /bin/bash --create-home appuser
+
+# Optimized layer caching
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    python3-pip \
+    curl \
+    wget \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install dependencies
+COPY requirements.txt .
+RUN pip3 install --user -r requirements.txt
+
+# Copy application code (after requirements to optimize caching)
+COPY . /app
+
+# Set working directory and user
+WORKDIR /app
+USER appuser
+
+# Stage 2: Production image
+FROM ubuntu:22.04
+
+# Create non-root user (same as builder stage)
+RUN groupadd --gid 1001 appuser && useradd --uid 1001 --gid appuser --shell /bin/bash --create-home appuser
+
+# Copy only necessary files from the builder stage
+COPY --from=builder /app /app
+COPY --from=builder /home/appuser/.local /home/appuser/.local
+
+# Set working directory and user
+WORKDIR /app
+USER appuser
+
+# Expose ports (securely managed in a reverse proxy in production)
+EXPOSE 8080
+
+# Healthcheck
+HEALTHCHECK --interval=30s --timeout=3s CMD curl -f http://localhost:8080 || exit 1
+
+# Run command
+CMD ["python3", "app.py"]
+
+# Conditional statements for environment-specific configurations
+ENV DB_PASSWORD=${DB_PASSWORD:-"default_dev_password"}
+ENV API_KEY=${API_KEY:-"default_dev_api_key"}
+
+# Add metadata labels
+LABEL maintainer="Your Name <your.email@example.com>" version="1.0"
