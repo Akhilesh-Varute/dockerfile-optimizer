@@ -1,4 +1,9 @@
 # Optimize Dockerfile with AI
+![Python](https://img.shields.io/badge/python-3.9-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+![Contributions](https://img.shields.io/badge/contributions-welcome-brightgreen)
+![Issues](https://img.shields.io/github/issues/Akhilesh-Varute/dockerfile-optimizer)
+![Stars](https://img.shields.io/github/stars/Akhilesh-Varute/dockerfile-optimizer?style=social)
 
 ## Overview
 This project provides a Python-based tool for analyzing and optimizing Dockerfiles. It leverages AI (Google Gemini) and static analysis to identify security issues, performance bottlenecks, and best practice violations, offering optimized Dockerfile configurations for both development and production environments.
@@ -12,6 +17,28 @@ This project provides a Python-based tool for analyzing and optimizing Dockerfil
 - **AI-Powered Optimization**: Uses Google Gemini AI to generate optimized Dockerfiles with multi-stage builds and environment-specific configurations.
 - **Automatic .dockerignore Generation**: Optionally creates a .dockerignore file to optimize build context.
 - **Rich Console Output**: Displays metrics, security checks, and environment analysis in formatted tables using the rich library.
+
+## 📊 AI Analysis Reports
+
+### 🔹 AI Findings Summary
+A high-level analysis from Gemini AI outlining key improvements and detected issues:
+
+![AI Findings Summary](images/ai-analysis-output.png)
+
+### 🔹 Detailed Security & Optimization Report
+Console-based report from the `rich` output (scrollable in terminal):
+
+![Comprehensive Analysis](images/comprehensive-analysis.png)
+
+
+### 🧾 Before vs After: Dockerfile Optimization
+
+| Version          | Preview                                                               |
+| ---------------- | --------------------------------------------------------------------- |
+| 🔸 Unoptimized    | [View Dockerfile.unoptimized.backup](./Dockerfile.unoptimized.backup) |
+| 🔹 Optimized (AI) | [View Dockerfile.optimized](./Dockerfile.optimized)                   |
+
+💡 These Dockerfiles are available in the root directory for reference and comparison.
 
 ## Prerequisites
 
@@ -126,7 +153,9 @@ Contributions are welcome! Please:
 
 ## License
 This project is licensed under the MIT License:
-MIT License
+<details>
+<summary>📄 MIT License</summary>
+
 
 Copyright (c) 2025 Akhilesh Varute
 
@@ -147,6 +176,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+</details>
 
 ## Contact
 For issues or questions, contact the maintainer or create an issue.
