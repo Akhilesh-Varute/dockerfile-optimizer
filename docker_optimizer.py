@@ -1142,7 +1142,1631 @@ def extract_optimized_dockerfile(ai_result: str) -> Optional[str]:
     return None
 
 
-if __name__ == "__main__":
+def suggest_distroless_alternative(base_image: str) -> str:
+    """Suggest appropriate distroless image based on the current base image."""
+    distroless_map = {
+        "python": "gcr.io/distroless/python3",
+        "node": "gcr.io/distroless/nodejs",
+        "java": "gcr.io/distroless/java",
+        "go": "gcr.io/distroless/static",
+        "debian": "gcr.io/distroless/base",
+        "ubuntu": "gcr.io/distroless/base",
+    }
+
+    for key, value in distroless_map.items():
+        if key in base_image.lower():
+            return value
+
+    return "gcr.io/distroless/base"
+
+
+def add_vulnerability_scanning_section() -> str:
+    """Generate vulnerability scanning recommendations for documentation."""
+    return """
+## 🔒 Vulnerability Scanning Integration
+
+Add these commands to your CI/CD pipeline to ensure security:
+
+```bash
+# Scan with Trivy (Recommended)
+docker build -t myapp:prod .
+trivy image --severity HIGH,CRITICAL myapp:prod
+
+# Or use Docker Scout
+docker scout cves myapp:prod
+
+# Regular scanning with cron job
+echo "0 2 * * * docker run -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --severity HIGH,CRITICAL myapp:prod" | sudo tee -a /etc/crontab
+```
+
+Ensure your CI pipeline fails when vulnerabilities above a certain threshold are found:
+
+```yaml
+# Example GitHub Actions step
+- name: Scan for vulnerabilities
+  run: |
+    trivy image --exit-code 1 --severity CRITICAL myapp:prod
+```
+"""
+
+
+def integrate_vulnerability_scanning(dockerfile_text: str) -> str:
+    """Modify the Dockerfile to include vulnerability scanning comments."""
+    scanning_comment = """
+# Security Scanning:
+# After building this image, scan it for vulnerabilities with:
+# trivy image --severity HIGH,CRITICAL $(docker images -q | head -n 1)
+# or
+# docker scout cves $(docker images -q | head -n 1)
+"""
+
+    # Add the comment near the top of the Dockerfile after any FROM statements
+    import re
+
+    # Find the last FROM statement
+    last_from_index = dockerfile_text.rfind("FROM ")
+    if last_from_index == -1:
+        # No FROM statement found, add comment at the top
+        return scanning_comment + dockerfile_text
+
+    # Find the end of the line containing the last FROM statement
+    end_of_line = dockerfile_text.find("\n", last_from_index)
+    if end_of_line == -1:
+        end_of_line = len(dockerfile_text)
+
+    # Insert the scanning comment after this line
+    return (
+        dockerfile_text[: end_of_line + 1]
+        + scanning_comment
+        + dockerfile_text[end_of_line + 1 :]
+    )
+
+
+def recommend_sbom_generation() -> str:
+    """Generate recommendations for SBOM creation and management."""
+    return """
+## 📦 Software Bill of Materials (SBOM)
+
+Adding SBOM generation to your pipeline provides transparency and improves security:
+
+```bash
+# Generate SBOM with Syft
+syft myapp:prod -o json > sbom.json
+
+# Or use Docker Buildx
+docker buildx build --sbom=true -t myapp:prod .
+
+# Verify SBOM contents
+grype sbom:./sbom.json
+
+# Store SBOMs in artifact repository for compliance
+curl -X PUT -H "Content-Type: application/json" -d @sbom.json https://your-artifact-repo/sboms/myapp-$(date +%Y%m%d).json
+```
+
+Include SBOM verification in your CI/CD pipeline to detect vulnerabilities early:
+
+```yaml
+# Example GitHub Actions step
+- name: Generate SBOM
+  run: syft myapp:prod -o json > sbom.json
+  
+- name: Scan SBOM for vulnerabilities
+  run: grype sbom:./sbom.json --fail-on high
+```
+"""
+
+
+def detect_hardcoded_secrets(dockerfile_text: str) -> list:
+    """Detect potential hardcoded secrets in Dockerfile."""
+    import re
+
+    # Patterns that might indicate secrets
+    secret_patterns = [
+        (r'(?i)password\s*=\s*[\'\"][^\'"]+[\'\"]', "Password"),
+        (r'(?i)passwd\s*=\s*[\'\"][^\'"]+[\'\"]', "Password"),
+        (r'(?i)pwd\s*=\s*[\'\"][^\'"]+[\'\"]', "Password"),
+        (r'(?i)secret\s*=\s*[\'\"][^\'"]+[\'\"]', "Secret"),
+        (r'(?i)token\s*=\s*[\'\"][^\'"]+[\'\"]', "Token"),
+        (r'(?i)api[-_]?key\s*=\s*[\'\"][^\'"]+[\'\"]', "API Key"),
+        (r'(?i)auth[-_]?token\s*=\s*[\'\"][^\'"]+[\'\"]', "Auth Token"),
+        (r'(?i)credentials\s*=\s*[\'\"][^\'"]+[\'\"]', "Credentials"),
+        # AWS specific
+        (
+            r'(?i)aws[-_]?access[-_]?key[-_]?id\s*=\s*[\'\"][^\'"]+[\'\"]',
+            "AWS Access Key",
+        ),
+        (
+            r'(?i)aws[-_]?secret[-_]?access[-_]?key\s*=\s*[\'\"][^\'"]+[\'\"]',
+            "AWS Secret Key",
+        ),
+        # Database connection strings
+        (r"(?i)jdbc:.*password=\w+", "Database Connection String"),
+        (r"(?i)mongodb://[^:]+:[^@]+@", "MongoDB Connection String"),
+        # Base64 encoded values (potential certificates/keys)
+        (r"(?i)base64:[a-zA-Z0-9+/]{30,}", "Base64 Encoded Value"),
+    ]
+
+    findings = []
+
+    for pattern, secret_type in secret_patterns:
+        matches = re.finditer(pattern, dockerfile_text)
+        for match in matches:
+            # Don't include the actual secret value in the result
+            # Just report line number and type
+            line_number = dockerfile_text[: match.start()].count("\n") + 1
+            findings.append(
+                {
+                    "line": line_number,
+                    "type": secret_type,
+                    "column": match.start()
+                    - dockerfile_text.rfind("\n", 0, match.start()),
+                }
+            )
+
+    return findings
+
+
+def recommend_secret_management() -> str:
+    """Generate recommendations for secret management."""
+    return """
+## 🔐 Secret Management Recommendations
+
+Replace hardcoded secrets with these more secure alternatives:
+
+1. **Use Build Arguments (Temporary Secrets):**
+   ```dockerfile
+   ARG DB_PASSWORD
+   ENV DATABASE_PASSWORD=$DB_PASSWORD
+   
+   # Build with: docker build --build-arg DB_PASSWORD=your_password -t myapp .
+   ```
+
+2. **Environment Variables at Runtime:**
+   ```dockerfile
+   # No secrets in Dockerfile
+   
+   # Run with: docker run -e DATABASE_PASSWORD=your_password myapp
+   # Or with env file: docker run --env-file=.env myapp
+   ```
+
+3. **Docker Secrets (Swarm Mode):**
+   ```dockerfile
+   # In Dockerfile
+   RUN --mount=type=secret,id=db_password cat /run/secrets/db_password
+   
+   # Create secret: docker secret create db_password password.txt
+   # Use in compose: 
+   # secrets:
+   #   db_password:
+   #     external: true
+   ```
+
+4. **Kubernetes Secrets:**
+   ```yaml
+   # Define secret
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: app-secrets
+   type: Opaque
+   data:
+     password: BASE64_ENCODED_PASSWORD
+   
+   # Mount in deployment
+   containers:
+     - name: myapp
+       env:
+         - name: DATABASE_PASSWORD
+           valueFrom:
+             secretKeyRef:
+               name: app-secrets
+               key: password
+   ```
+
+5. **Secret Management Services:**
+   - HashiCorp Vault
+   - AWS Secrets Manager
+   - Azure Key Vault
+   - Google Secret Manager
+
+6. **Secret Detection Tools:**
+   ```bash
+   # Add to CI/CD
+   gitleaks detect --source=./
+   trufflehog filesystem --directory=./
+   ```
+"""
+
+
+def recommend_image_signing() -> str:
+    """Generate recommendations for image signing and security."""
+    return """
+## 🔏 Image Signing Recommendations
+
+Implement image signing to ensure image authenticity and integrity:
+
+### Docker Content Trust (DCT)
+
+```bash
+# Enable Docker Content Trust
+export DOCKER_CONTENT_TRUST=1
+
+# Sign the image during push
+docker push myregistry.com/myapp:1.0.0
+
+# Verify signed images
+docker trust inspect --pretty myregistry.com/myapp:1.0.0
+```
+
+### Cosign (Sigstore)
+
+```bash
+# Generate a keypair
+cosign generate-key-pair
+
+# Sign an image
+cosign sign --key cosign.key myregistry.com/myapp:1.0.0
+
+# Verify an image
+cosign verify --key cosign.pub myregistry.com/myapp:1.0.0
+```
+
+### CI/CD Integration
+
+```yaml
+# GitHub Actions example
+- name: Install Cosign
+  uses: sigstore/cosign-installer@main
+
+- name: Sign the image
+  run: |
+    cosign sign --key ${COSIGN_KEY} myregistry.com/myapp:${{ github.sha }}
+  env:
+    COSIGN_KEY: ${{ secrets.COSIGN_KEY }}
+    COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+```
+
+### Policy Enforcement
+
+Configure your Kubernetes cluster to verify signatures with admission controllers:
+
+```yaml
+apiVersion: admission.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: verify-image-signatures
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["pods"]
+  validations:
+    - expression: "has(object.spec.containers[0].image) && object.spec.containers[0].image.matches('^myregistry.com/.*')"
+      message: "Only signed images from myregistry.com are allowed"
+```
+"""
+
+
+def recommend_resource_limits() -> str:
+    """Generate recommendations for container resource limits."""
+    return """
+## 🔋 Resource Limits Recommendations
+
+### Docker Run/Compose Resource Limits
+
+```bash
+# Set resource limits with docker run
+docker run -m 512m --cpus=1.0 myapp:latest
+
+# Docker Compose example
+services:
+  app:
+    image: myapp:latest
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+```
+
+### Kubernetes Resource Management
+
+```yaml
+# Pod specification with resource limits
+apiVersion: v1
+kind: Pod
+metadata:
+  name: myapp
+spec:
+  containers:
+  - name: app
+    image: myapp:latest
+    resources:
+      requests:
+        memory: "256Mi"
+        cpu: "500m"
+      limits:
+        memory: "512Mi"
+        cpu: "1000m"
+```
+
+### Resource Limit Best Practices:
+
+1. **Set both requests and limits**
+   - Requests: What the container is guaranteed to get
+   - Limits: The maximum the container can use
+
+2. **Monitor resource usage to determine proper values**
+   ```bash
+   # Docker stats
+   docker stats myapp
+   
+   # Kubernetes resource usage
+   kubectl top pod myapp
+   ```
+
+3. **Consider application-specific settings**
+   - JVM memory settings: `-Xmx512m -Xms256m`
+   - Node.js memory: `--max-old-space-size=512`
+   - Python memory monitoring: `resource` module or memory-profiler
+
+4. **Implement autoscaling based on resource usage**
+   ```yaml
+   # Kubernetes HPA example
+   apiVersion: autoscaling/v2
+   kind: HorizontalPodAutoscaler
+   metadata:
+     name: myapp-hpa
+   spec:
+     scaleTargetRef:
+       apiVersion: apps/v1
+       kind: Deployment
+       name: myapp
+     minReplicas: 1
+     maxReplicas: 10
+     metrics:
+     - type: Resource
+       resource:
+         name: cpu
+         target:
+           type: Utilization
+           averageUtilization: 80
+   ```
+"""
+
+
+def add_dockerfile_healthcheck(dockerfile_text: str) -> str:
+    """Add a HEALTHCHECK instruction to a Dockerfile if missing."""
+    if "HEALTHCHECK" in dockerfile_text:
+        return dockerfile_text  # Already has a healthcheck
+
+    # Try to determine the application type and port
+    import re
+
+    # Extract exposed port if available
+    exposed_port = "8080"  # Default port
+    expose_match = re.search(r"EXPOSE\s+(\d+)", dockerfile_text)
+    if expose_match:
+        exposed_port = expose_match.group(1)
+
+    # Determine application type
+    is_node = any(x in dockerfile_text.lower() for x in ["node", "npm", "yarn"])
+    is_python = any(
+        x in dockerfile_text.lower() for x in ["python", "pip", "django", "flask"]
+    )
+    is_java = any(x in dockerfile_text.lower() for x in ["java", "mvn", "gradle"])
+
+    # Create appropriate healthcheck based on app type
+    healthcheck = ""
+    if is_node:
+        healthcheck = f"HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD wget -q -O- http://localhost:{exposed_port}/health || exit 1"
+    elif is_python:
+        healthcheck = f"HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD curl -f http://localhost:{exposed_port}/health || exit 1"
+    elif is_java:
+        healthcheck = f"HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD curl -f http://localhost:{exposed_port}/actuator/health || exit 1"
+    else:
+        healthcheck = f"HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD wget -q -O- http://localhost:{exposed_port}/ || exit 1"
+
+    # Find the right position to add the healthcheck (after EXPOSE, before CMD/ENTRYPOINT)
+    cmd_pos = dockerfile_text.find("CMD ")
+    entrypoint_pos = dockerfile_text.find("ENTRYPOINT ")
+
+    if cmd_pos == -1 and entrypoint_pos == -1:
+        # No CMD or ENTRYPOINT, add to the end
+        return dockerfile_text + "\n\n# Add healthcheck\n" + healthcheck
+
+    # Insert before the first CMD or ENTRYPOINT
+    insert_pos = min(x for x in [cmd_pos, entrypoint_pos] if x >= 0)
+    return (
+        dockerfile_text[:insert_pos]
+        + "\n# Add healthcheck\n"
+        + healthcheck
+        + "\n\n"
+        + dockerfile_text[insert_pos:]
+    )
+
+
+def enhance_generate_optimization_prompt(dockerfile_text: str) -> str:
+    """Enhanced version of generate_optimization_prompt with additional security features."""
+    # First call the original function to get the base prompt
+    original_prompt = generate_optimization_prompt(dockerfile_text)
+
+    # Add our new recommendations
+    distroless_base = suggest_distroless_alternative(dockerfile_text)
+
+    # Detect potential secrets
+    secret_findings = detect_hardcoded_secrets(dockerfile_text)
+    secrets_section = ""
+    if secret_findings:
+        secrets_section = "\n## ⚠️ Potential Secrets Detected\n"
+        for finding in secret_findings:
+            secrets_section += f"- {finding['type']} found at line {finding['line']}\n"
+
+    additional_sections = f"""
+## 🛡️ Advanced Security Recommendations
+
+### Distroless Images
+Consider using a distroless base image for production:
+```dockerfile
+FROM {distroless_base}
+```
+
+Distroless images contain only your application and its runtime dependencies, without package managers, shells, or other programs found in standard Linux distributions. This reduces attack surface and image size.
+
+{secrets_section}
+
+### Image Signing
+{recommend_image_signing()}
+
+### Secret Management
+{recommend_secret_management()}
+
+### SBOM Generation
+{recommend_sbom_generation()}
+
+### Resource Limits
+{recommend_resource_limits()}
+
+### Vulnerability Scanning
+{add_vulnerability_scanning_section()}
+"""
+
+    # Add the additional sections before the final validation commands
+    validation_cmd_pos = original_prompt.find("## 🚀 Validation Commands")
+    if validation_cmd_pos > 0:
+        return (
+            original_prompt[:validation_cmd_pos]
+            + additional_sections
+            + original_prompt[validation_cmd_pos:]
+        )
+    else:
+        return original_prompt + additional_sections
+
+
+def analyze_container_escape_risks(dockerfile_text: str) -> list:
+    """Analyze Dockerfile for container escape risks."""
+    risks = []
+
+    # Check for privileged mode indicators
+    if "--privileged" in dockerfile_text:
+        risks.append(
+            {
+                "severity": "CRITICAL",
+                "title": "Container running in privileged mode",
+                "description": "Privileged containers can escape isolation and access host resources.",
+                "recommendation": "Remove --privileged flag. Use more specific capabilities if needed.",
+            }
+        )
+
+    # Check for mounting sensitive host directories
+    sensitive_mounts = [
+        "/proc",
+        "/sys",
+        "/var/run/docker.sock",
+        "docker.sock",
+        "/dev",
+        "/var",
+        "/etc",
+    ]
+
+    for mount in sensitive_mounts:
+        if f"-v {mount}" in dockerfile_text or f"--volume {mount}" in dockerfile_text:
+            risks.append(
+                {
+                    "severity": "HIGH",
+                    "title": f"Mounting sensitive host path {mount}",
+                    "description": "Mounting sensitive host paths can lead to container escapes.",
+                    "recommendation": f"Avoid mounting {mount}. Use more restricted volumes.",
+                }
+            )
+
+    # Check for capability additions
+    dangerous_caps = ["CAP_SYS_ADMIN", "CAP_NET_ADMIN", "CAP_SYS_PTRACE"]
+
+    for cap in dangerous_caps:
+        if (
+            f"--cap-add={cap}" in dockerfile_text
+            or f"--cap-add {cap}" in dockerfile_text
+        ):
+            risks.append(
+                {
+                    "severity": "HIGH",
+                    "title": f"Adding dangerous capability {cap}",
+                    "description": "This capability could be used to escape the container.",
+                    "recommendation": f"Remove {cap} capability. Use more specific permissions.",
+                }
+            )
+
+    # Check for network=host
+    if "--network=host" in dockerfile_text or "--net=host" in dockerfile_text:
+        risks.append(
+            {
+                "severity": "MEDIUM",
+                "title": "Using host network mode",
+                "description": "Host network mode bypasses container network isolation.",
+                "recommendation": "Use the default bridge network or create a custom network.",
+            }
+        )
+
+    return risks
+
+
+def cis_docker_benchmark_assessment(dockerfile_text: str) -> dict:
+    """Assess Dockerfile against CIS Docker Benchmark."""
+    assessment = {"passed": [], "failed": [], "skipped": []}
+
+    # 4.1 Create a user for the container
+    if "USER " in dockerfile_text and "USER root" not in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.1",
+                "title": "Create a user for the container",
+                "description": "Running containers with a non-root user can prevent privilege escalation attacks.",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.1",
+                "title": "Create a user for the container",
+                "description": "Create a non-root user and use the USER instruction to switch to it.",
+            }
+        )
+
+    # 4.2 Use trusted base images
+    is_known_registry = any(
+        registry in dockerfile_text
+        for registry in [
+            "docker.io",
+            "gcr.io",
+            "quay.io",
+            "mcr.microsoft.com",
+            "registry.access.redhat.com",
+        ]
+    )
+    if is_known_registry:
+        assessment["passed"].append(
+            {
+                "id": "4.2",
+                "title": "Use trusted base images",
+                "description": "Using official or trusted base images reduces security risks.",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.2",
+                "title": "Use trusted base images",
+                "description": "Verify that base images come from trusted sources.",
+            }
+        )
+
+    # 4.3 Do not install unnecessary packages
+    if (
+        "apk --no-cache" in dockerfile_text
+        or "apt-get --no-install-recommends" in dockerfile_text
+    ):
+        assessment["passed"].append(
+            {
+                "id": "4.3",
+                "title": "Do not install unnecessary packages",
+                "description": "Minimizing installed packages reduces attack surface.",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.3",
+                "title": "Do not install unnecessary packages",
+                "description": "Use --no-install-recommends for apt or --no-cache for apk.",
+            }
+        )
+
+    # 4.4 Scan and rebuild images to include security patches
+    if "latest" not in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.4",
+                "title": "Scan and rebuild images",
+                "description": "Using specific versions helps ensure regular rebuilds with security patches.",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.4",
+                "title": "Avoid using 'latest' tag",
+                "description": "Use specific version tags and implement regular scanning.",
+            }
+        )
+
+    # 4.5 Enable content trust for Docker
+    assessment["skipped"].append(
+        {
+            "id": "4.5",
+            "title": "Enable content trust for Docker",
+            "description": "Cannot verify from Dockerfile. Set DOCKER_CONTENT_TRUST=1 in build environment.",
+        }
+    )
+
+    # 4.6 Add HEALTHCHECK instruction
+    if "HEALTHCHECK" in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.6",
+                "title": "Add HEALTHCHECK instruction",
+                "description": "Healthchecks help ensure container health and proper functioning.",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.6",
+                "title": "Add HEALTHCHECK instruction",
+                "description": "Add a HEALTHCHECK instruction to detect application failures.",
+            }
+        )
+
+    # 4.7 Do not use update instructions alone
+    if (
+        "apt-get update" in dockerfile_text
+        and "apt-get update &&" not in dockerfile_text
+    ):
+        assessment["failed"].append(
+            {
+                "id": "4.7",
+                "title": "Do not use update instructions alone",
+                "description": "Combine update and install in single RUN instruction.",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.7",
+                "title": "Do not use update instructions alone",
+                "description": "Updates and installs appear to be combined properly.",
+            }
+        )
+
+    # 4.8 Remove setuid and setgid permissions
+    if "chmod -R" in dockerfile_text and "find / -perm" in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.8",
+                "title": "Remove setuid and setgid permissions",
+                "description": "Removing unnecessary setuid binaries reduces privilege escalation risks.",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.8",
+                "title": "Remove setuid and setgid permissions",
+                "description": "Consider removing setuid/setgid from binaries not required by app.",
+            }
+        )
+
+    # 4.9 Use COPY instead of ADD
+    if "ADD" in dockerfile_text:
+        assessment["failed"].append(
+            {
+                "id": "4.9",
+                "title": "Use COPY instead of ADD",
+                "description": "COPY is more transparent than ADD and should be preferred.",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.9",
+                "title": "Use COPY instead of ADD",
+                "description": "COPY is being used properly instead of ADD.",
+            }
+        )
+
+    # 4.10 Do not store secrets in Dockerfiles
+    has_possible_secrets = any(
+        pattern in dockerfile_text.lower()
+        for pattern in ["password", "secret", "key", "token", "auth", "cred"]
+    )
+    if has_possible_secrets:
+        assessment["failed"].append(
+            {
+                "id": "4.10",
+                "title": "Do not store secrets in Dockerfiles",
+                "description": "Potential secrets found. Use build args, environment variables, or secret management.",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.10",
+                "title": "Do not store secrets in Dockerfiles",
+                "description": "No obvious secrets detected in Dockerfile.",
+            }
+        )
+
+    # 4.11 Install verified packages
+    if (
+        "apt-get install" in dockerfile_text
+        and "--allow-unauthenticated" not in dockerfile_text
+    ):
+        assessment["passed"].append(
+            {
+                "id": "4.11",
+                "title": "Install verified packages",
+                "description": "Package authenticity appears to be verified during installation.",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.11",
+                "title": "Install verified packages",
+                "description": "Ensure packages are verified (avoid --allow-unauthenticated).",
+            }
+        )
+
+    return assessment
+
+
+def generate_container_security_best_practices() -> str:
+    """Generate container security best practices documentation."""
+    return """
+## 🔒 Container Security Best Practices
+
+### Runtime Security
+- 🛡️ **Run containers with read-only filesystem**
+  ```
+  docker run --read-only myapp:latest
+  ```
+  
+- 🔐 **Apply seccomp profiles**
+  ```
+  docker run --security-opt seccomp=profile.json myapp:latest
+  ```
+  
+- 🚫 **Use no-new-privileges flag**
+  ```
+  docker run --security-opt=no-new-privileges myapp:latest
+  ```
+
+### Image Hardening
+- 🔍 **Minimize image size**
+  - Use multi-stage builds
+  - Use distroless or Alpine-based images
+  - Remove development tools and documentation
+  
+- 🧹 **Remove shell access when possible**
+  - Use ENTRYPOINT with exec form: `ENTRYPOINT ["executable", "param1"]`
+  - Consider distroless images without shell
+  
+- 📊 **Set resource limits**
+  - CPU: `--cpus=1.0`
+  - Memory: `-m 512m`
+  - PIDs: `--pids-limit=100`
+
+### Supply Chain Security
+- 🔏 **Sign and verify images**
+  - Use Docker Content Trust or Cosign
+  - Verify signatures before deployment
+  
+- 📜 **Generate and verify SBOMs**
+  - Create with Syft or Docker Buildx
+  - Verify with Grype
+  
+- 🔄 **Implement automated base image updates**
+  - Use Dependabot or Renovate
+  - Set up CI for regular rebuilds
+
+### Configuration Security
+- 🌟 **Apply principle of least privilege**
+  - Drop capabilities: `--cap-drop=ALL --cap-add=NET_BIND_SERVICE`
+  - Use non-root users
+  
+- 🔧 **Use security contexts in Kubernetes**
+  ```yaml
+  securityContext:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
+  ```
+  
+- 🛑 **Implement network policies**
+  - Restrict pod-to-pod communication
+  - Apply egress filtering
+
+### Operational Security
+- 🔍 **Implement runtime security monitoring**
+  - Falco for runtime security
+  - Sysdig for container monitoring
+  
+- 📊 **Regular security scanning**
+  - Scan images in CI/CD pipeline
+  - Scan running containers
+  
+- 🚨 **Implement monitoring and alerting**
+  - Monitor container logs
+  - Set up alerts for suspicious activities
+"""
+
+
+def generate_dockerfile_security_report(dockerfile_text: str) -> str:
+    """Generate a comprehensive security report for a Dockerfile."""
+    escape_risks = analyze_container_escape_risks(dockerfile_text)
+    cis_assessment = cis_docker_benchmark_assessment(dockerfile_text)
+
+    # Format escape risks section
+    escape_risks_section = ""
+    if escape_risks:
+        escape_risks_section = "### Container Escape Risks\n\n"
+        for risk in escape_risks:
+            escape_risks_section += f"- **{risk['severity']}:** {risk['title']}\n"
+            escape_risks_section += f"  - {risk['description']}\n"
+            escape_risks_section += (
+                f"  - **Recommendation:** {risk['recommendation']}\n\n"
+            )
+    else:
+        escape_risks_section = "### Container Escape Risks\n\n✅ No immediate container escape risks detected.\n\n"
+
+    # Format CIS Benchmark section
+    cis_section = "### CIS Docker Benchmark Assessment\n\n"
+
+    if cis_assessment["passed"]:
+        cis_section += "#### ✅ Passed Checks\n\n"
+        for item in cis_assessment["passed"]:
+            severity_icon = (
+                "🔴"
+                if item.get("severity") == "CRITICAL"
+                else (
+                    "🟠"
+                    if item.get("severity") == "HIGH"
+                    else "🟡" if item.get("severity") == "MEDIUM" else "🟢"
+                )
+            )
+            cis_section += f"- **{item['id']} {item['title']}** {severity_icon}\n"
+            cis_section += f"  - {item['description']}\n\n"
+
+    if cis_assessment["failed"]:
+        cis_section += "#### ❌ Failed Checks\n\n"
+        for item in cis_assessment["failed"]:
+            severity_icon = (
+                "🔴"
+                if item.get("severity") == "CRITICAL"
+                else (
+                    "🟠"
+                    if item.get("severity") == "HIGH"
+                    else "🟡" if item.get("severity") == "MEDIUM" else "🟢"
+                )
+            )
+            cis_section += f"- **{item['id']} {item['title']}** {severity_icon}\n"
+            cis_section += f"  - {item['description']}\n\n"
+
+    if cis_assessment["skipped"]:
+        cis_section += "#### ⚠️ Manual Review Required\n\n"
+        for item in cis_assessment["skipped"]:
+            severity_icon = (
+                "🔴"
+                if item.get("severity") == "CRITICAL"
+                else (
+                    "🟠"
+                    if item.get("severity") == "HIGH"
+                    else "🟡" if item.get("severity") == "MEDIUM" else "🟢"
+                )
+            )
+            cis_section += f"- **{item['id']} {item['title']}** {severity_icon}\n"
+            cis_section += f"  - {item['description']}\n\n"
+
+    # Calculate overall score
+    total_checks = len(cis_assessment["passed"]) + len(cis_assessment["failed"])
+    if total_checks > 0:
+        score = int((len(cis_assessment["passed"]) / total_checks) * 100)
+        score_color = "🟢" if score >= 80 else "🟡" if score >= 60 else "🔴"
+        score_section = f"### Security Score: {score_color} {score}%\n\n"
+    else:
+        score_section = ""
+
+    # Generate remediation examples for failed checks
+    remediation_examples = generate_remediation_examples(cis_assessment["failed"])
+
+    # Generate implementation timeline
+    implementation_timeline = generate_implementation_timeline(cis_assessment["failed"])
+
+    # Get CI/CD integration examples
+    cicd_examples = generate_cicd_integration_examples()
+
+    # Get documentation links
+    documentation_links = generate_documentation_links()
+
+    # Combine all sections
+    report = f"""
+# 🛡️ Dockerfile Security Assessment Report
+
+{score_section}
+{escape_risks_section}
+{cis_section}
+
+{remediation_examples}
+
+{implementation_timeline}
+
+### 📚 Best Practices
+
+{generate_container_security_best_practices()}
+
+{cicd_examples}
+
+{documentation_links}
+
+### 🔄 Next Steps
+
+1. Address any failed CIS Docker Benchmark checks
+2. Implement image signing with Cosign or Docker Content Trust
+3. Set up automated vulnerability scanning in CI/CD
+4. Generate and verify SBOMs as part of the build process
+5. Consider using distroless images for production
+"""
+
+    return report
+
+
+def write_file_with_encoding(file_path, content, encoding="utf-8"):
+    """Write content to a file with specific encoding and error handling."""
+    try:
+        with open(file_path, "w", encoding=encoding) as f:
+            f.write(content)
+        return True
+    except UnicodeEncodeError:
+        # If UTF-8 fails, try writing without emoji characters
+        try:
+            # Simple function to strip emoji characters
+            def remove_emojis(text):
+                import re
+
+                emoji_pattern = re.compile(
+                    "["
+                    "\U0001f600-\U0001f64f"  # emoticons
+                    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+                    "\U0001f680-\U0001f6ff"  # transport & map symbols
+                    "\U0001f700-\U0001f77f"  # alchemical symbols
+                    "\U0001f780-\U0001f7ff"  # Geometric Shapes
+                    "\U0001f800-\U0001f8ff"  # Supplemental Arrows-C
+                    "\U0001f900-\U0001f9ff"  # Supplemental Symbols and Pictographs
+                    "\U0001fa00-\U0001fa6f"  # Chess Symbols
+                    "\U0001fa70-\U0001faff"  # Symbols and Pictographs Extended-A
+                    "\U00002702-\U000027b0"  # Dingbats
+                    "\U000024c2-\U0001f251"
+                    "]+",
+                    flags=re.UNICODE,
+                )
+                return emoji_pattern.sub(r"", text)
+
+            # Replace emoji symbols with text equivalents
+            cleaned_content = content
+            cleaned_content = cleaned_content.replace("🔒", "[LOCK]")
+            cleaned_content = cleaned_content.replace("✅", "[CHECK]")
+            cleaned_content = cleaned_content.replace("❌", "[X]")
+            cleaned_content = cleaned_content.replace("⚠️", "[WARNING]")
+            cleaned_content = cleaned_content.replace("📋", "[REPORT]")
+            cleaned_content = cleaned_content.replace("🛡️", "[SHIELD]")
+            cleaned_content = cleaned_content.replace("🟢", "[GREEN]")
+            cleaned_content = cleaned_content.replace("🟡", "[YELLOW]")
+            cleaned_content = cleaned_content.replace("🔴", "[RED]")
+            cleaned_content = cleaned_content.replace("📚", "[BOOKS]")
+            cleaned_content = cleaned_content.replace("🔄", "[REFRESH]")
+
+            # If there are still emoji characters, remove them
+            cleaned_content = remove_emojis(cleaned_content)
+
+            with open(file_path, "w", encoding="ascii", errors="replace") as f:
+                f.write(cleaned_content)
+            return True
+        except Exception as e:
+            console.print(
+                f"Error writing file with ASCII encoding: {str(e)}", style="red"
+            )
+            return False
+    except Exception as e:
+        console.print(f"Error writing file: {str(e)}", style="red")
+        return False
+
+
+# Enhanced Security Assessment Functions
+# Add these functions to your Dockerfile Optimizer tool
+
+
+def generate_cicd_integration_examples() -> str:
+    """Generate CI/CD integration examples for Docker security scanning."""
+    return """
+## 🚀 CI/CD Integration Examples
+
+### GitHub Actions Integration
+
+```yaml
+# .github/workflows/docker-security.yml
+name: Docker Security Scanning
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - '.github/workflows/docker-security.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Build image
+        run: docker build -t test-image:${{ github.sha }} .
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'test-image:${{ github.sha }}'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+          exit-code: '1'
+          ignore-unfixed: true
+
+      - name: Generate SBOM
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+          syft test-image:${{ github.sha }} -o json > sbom.json
+
+      - name: Scan SBOM for vulnerabilities
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+          grype sbom:./sbom.json --fail-on high
+
+      - name: Sign image (on main branch)
+        if: github.ref == 'refs/heads/main' && success()
+        uses: sigstore/cosign-installer@main
+        with:
+          cosign-release: 'v1.13.1'
+      - run: |
+          echo "${{ secrets.COSIGN_KEY }}" > cosign.key
+          cosign sign --key cosign.key test-image:${{ github.sha }}
+        env:
+          COSIGN_PASSWORD: ${{ secrets.COSIGN_PASSWORD }}
+```
+
+### GitLab CI Integration
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - build
+  - scan
+  - sign
+
+build:
+  stage: build
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+security_scan:
+  stage: scan
+  image: aquasec/trivy:latest
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+
+sbom_generation:
+  stage: scan
+  image: anchore/syft:latest
+  script:
+    - syft $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA -o json > sbom.json
+    - cat sbom.json | jq '.artifacts | length'
+  artifacts:
+    paths:
+      - sbom.json
+
+image_signing:
+  stage: sign
+  image: alpine:latest
+  script:
+    - apk add --no-cache cosign
+    - echo "$COSIGN_KEY" > cosign.key
+    - cosign sign --key cosign.key $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+  only:
+    - main
+```
+
+### CircleCI Integration
+
+```yaml
+# .circleci/config.yml
+version: 2.1
+
+orbs:
+  docker: circleci/docker@2.1.4
+
+jobs:
+  security-scan:
+    docker:
+      - image: cimg/base:2023.03
+    steps:
+      - checkout
+      - setup_remote_docker:
+          version: 20.10.14
+      - docker/build:
+          image: my-app
+          tag: $CIRCLE_SHA1
+      - run:
+          name: Install Trivy
+          command: |
+            curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+      - run:
+          name: Scan Docker image
+          command: |
+            trivy image --exit-code 1 --severity HIGH,CRITICAL my-app:$CIRCLE_SHA1
+
+workflows:
+  docker-security:
+    jobs:
+      - security-scan
+```
+"""
+
+
+def generate_documentation_links() -> str:
+    """Generate links to Docker security documentation and tools."""
+    return """
+## 📚 Documentation & Resources
+
+### Official Documentation
+- [Docker Security Best Practices](https://docs.docker.com/develop/security-best-practices/)
+- [CIS Docker Benchmark](https://www.cisecurity.org/benchmark/docker)
+- [OWASP Docker Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Docker_Security_Cheat_Sheet.html)
+
+### Security Tools
+- [Trivy Scanner](https://github.com/aquasecurity/trivy) - Comprehensive container vulnerability scanner
+- [Cosign](https://github.com/sigstore/cosign) - Container signing, verification, and storage
+- [Syft](https://github.com/anchore/syft) - SBOM generator for containers
+- [Grype](https://github.com/anchore/grype) - Vulnerability scanner for SBOM files
+- [Docker Scout](https://docs.docker.com/scout/) - Official Docker vulnerability scanning
+- [Falco](https://falco.org/) - Cloud-native runtime security
+
+### Distroless Images
+- [Google Distroless](https://github.com/GoogleContainerTools/distroless) - Base image alternatives
+- [Chainguard Images](https://www.chainguard.dev/chainguard-images) - Minimal, secure base images
+
+### Secrets Management
+- [HashiCorp Vault](https://www.vaultproject.io/) - Secrets management
+- [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/) - Cloud-based secrets management
+- [GitLeaks](https://github.com/zricethezav/gitleaks) - Secret scanning for git repositories
+"""
+
+
+def generate_remediation_examples(failed_checks) -> str:
+    """Generate specific Dockerfile remediation examples based on failed checks."""
+    remediation_examples = "## 🛠️ Remediation Examples\n\n"
+
+    for check in failed_checks:
+        if check["id"] == "4.1":  # Create a user
+            remediation_examples += """### Non-Root User (4.1)
+```dockerfile
+# For Debian/Ubuntu-based images
+RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+USER appuser
+
+# For Alpine-based images
+RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+USER appuser
+```
+"""
+        elif check["id"] == "4.3":  # Unnecessary packages
+            remediation_examples += """### Minimize Installed Packages (4.3)
+```dockerfile
+# For Debian/Ubuntu-based images
+RUN apt-get update && apt-get install --no-install-recommends -y package1 package2 \\
+    && rm -rf /var/lib/apt/lists/*
+
+# For Alpine-based images
+RUN apk add --no-cache package1 package2
+```
+"""
+        elif check["id"] == "4.4":  # Avoid latest
+            remediation_examples += """### Use Specific Image Tags (4.4)
+```dockerfile
+# Instead of
+FROM node:latest
+
+# Use specific version
+FROM node:18.15.0-alpine3.16
+```
+"""
+        elif check["id"] == "4.6":  # Healthcheck
+            remediation_examples += """### Add Healthcheck (4.6)
+```dockerfile
+# For web services
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD wget -q -O- http://localhost:8080/health || exit 1
+
+# For non-web services
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \\
+  CMD pgrep -f "main process" || exit 1
+```
+"""
+        elif check["id"] == "4.7":  # Update instructions
+            remediation_examples += """### Combine Update Instructions (4.7)
+```dockerfile
+# Instead of
+RUN apt-get update
+RUN apt-get install -y package1 package2
+
+# Use this combined form
+RUN apt-get update && apt-get install -y package1 package2 \\
+    && rm -rf /var/lib/apt/lists/*
+```
+"""
+        elif check["id"] == "4.8":  # setuid/setgid
+            remediation_examples += """### Remove unnecessary setuid binaries (4.8)
+```dockerfile
+RUN find / -perm /6000 -type f -exec chmod a-s {} \\; || true
+```
+"""
+        elif check["id"] == "4.9":  # COPY instead of ADD
+            remediation_examples += """### Use COPY instead of ADD (4.9)
+```dockerfile
+# Instead of
+ADD https://example.com/file.tar.gz /tmp/
+RUN tar -xzf /tmp/file.tar.gz -C /app
+
+# Use this
+RUN wget -O /tmp/file.tar.gz https://example.com/file.tar.gz \\
+    && tar -xzf /tmp/file.tar.gz -C /app \\
+    && rm /tmp/file.tar.gz
+
+# Or for local files, instead of
+ADD . /app
+
+# Use
+COPY . /app
+```
+"""
+        elif check["id"] == "4.10":  # Secrets
+            remediation_examples += """### Avoid storing secrets (4.10)
+```dockerfile
+# Instead of
+ENV API_KEY="secret-key-value"
+
+# Use build arguments (for build-time only)
+ARG API_KEY
+RUN ./setup.sh $API_KEY
+
+# Or use runtime environment variables (preferred)
+# In Dockerfile - don't set a value:
+ENV API_KEY=""
+# Then at runtime:
+# docker run -e API_KEY=secret-value myimage
+```
+"""
+
+    return remediation_examples
+
+
+def generate_implementation_timeline(failed_checks) -> str:
+    """Generate timeline recommendations for implementing security fixes."""
+    # Categorize the failed checks by severity
+    critical = [c for c in failed_checks if c["severity"] == "CRITICAL"]
+    high = [c for c in failed_checks if c["severity"] == "HIGH"]
+    medium = [c for c in failed_checks if c["severity"] == "MEDIUM"]
+    low = [c for c in failed_checks if c["severity"] == "LOW"]
+
+    timeline = "## ⏱️ Implementation Timeline\n\n"
+
+    if critical or high:
+        timeline += "### Immediate (Next 24-48 hours)\n\n"
+        for check in critical + high:
+            timeline += f"- **{check['id']} {check['title']}** ({check['severity']})\n"
+        timeline += "\n"
+
+    if medium:
+        timeline += "### Short-term (Next 1-2 weeks)\n\n"
+        for check in medium:
+            timeline += f"- **{check['id']} {check['title']}** ({check['severity']})\n"
+        timeline += "\n"
+
+    if low:
+        timeline += "### Mid-term (Next 2-4 weeks)\n\n"
+        for check in low:
+            timeline += f"- **{check['id']} {check['title']}** ({check['severity']})\n"
+        timeline += "\n"
+
+    timeline += """### Long-term (Next 1-3 months)
+    
+- Implement automated image scanning in CI/CD pipeline
+- Set up container signing workflow
+- Generate and verify SBOMs in build process
+- Implement runtime container security monitoring
+- Establish container security policy document
+"""
+
+    return timeline
+
+
+def cis_docker_benchmark_assessment(dockerfile_text: str) -> dict:
+    """Assess Dockerfile against CIS Docker Benchmark."""
+    assessment = {"passed": [], "failed": [], "skipped": []}
+
+    # 4.1 Create a user for the container
+    if "USER " in dockerfile_text and "USER root" not in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.1",
+                "title": "Create a user for the container",
+                "description": "Running containers with a non-root user can prevent privilege escalation attacks.",
+                "severity": "HIGH",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.1",
+                "title": "Create a user for the container",
+                "description": "Create a non-root user and use the USER instruction to switch to it.",
+                "severity": "HIGH",
+            }
+        )
+
+    # 4.2 Use trusted base images
+    is_known_registry = any(
+        registry in dockerfile_text
+        for registry in [
+            "docker.io",
+            "gcr.io",
+            "quay.io",
+            "mcr.microsoft.com",
+            "registry.access.redhat.com",
+        ]
+    )
+    if is_known_registry:
+        assessment["passed"].append(
+            {
+                "id": "4.2",
+                "title": "Use trusted base images",
+                "description": "Using official or trusted base images reduces security risks.",
+                "severity": "MEDIUM",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.2",
+                "title": "Use trusted base images",
+                "description": "Verify that base images come from trusted sources.",
+                "severity": "MEDIUM",
+            }
+        )
+
+    # 4.3 Do not install unnecessary packages
+    if (
+        "apk --no-cache" in dockerfile_text
+        or "apt-get --no-install-recommends" in dockerfile_text
+    ):
+        assessment["passed"].append(
+            {
+                "id": "4.3",
+                "title": "Do not install unnecessary packages",
+                "description": "Minimizing installed packages reduces attack surface.",
+                "severity": "MEDIUM",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.3",
+                "title": "Do not install unnecessary packages",
+                "description": "Use --no-install-recommends for apt or --no-cache for apk.",
+                "severity": "MEDIUM",
+            }
+        )
+
+    # 4.4 Scan and rebuild images to include security patches
+    if "latest" not in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.4",
+                "title": "Scan and rebuild images",
+                "description": "Using specific versions helps ensure regular rebuilds with security patches.",
+                "severity": "HIGH",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.4",
+                "title": "Avoid using 'latest' tag",
+                "description": "Use specific version tags and implement regular scanning.",
+                "severity": "HIGH",
+            }
+        )
+
+    # 4.5 Enable content trust for Docker
+    assessment["skipped"].append(
+        {
+            "id": "4.5",
+            "title": "Enable content trust for Docker",
+            "description": "Cannot verify from Dockerfile. Set DOCKER_CONTENT_TRUST=1 in build environment.",
+            "severity": "MEDIUM",
+        }
+    )
+
+    # 4.6 Add HEALTHCHECK instruction
+    if "HEALTHCHECK" in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.6",
+                "title": "Add HEALTHCHECK instruction",
+                "description": "Healthchecks help ensure container health and proper functioning.",
+                "severity": "MEDIUM",
+            }
+        )
+    else:
+        assessment["failed"].append(
+            {
+                "id": "4.6",
+                "title": "Add HEALTHCHECK instruction",
+                "description": "Add a HEALTHCHECK instruction to detect application failures.",
+                "severity": "MEDIUM",
+            }
+        )
+
+    # 4.7 Do not use update instructions alone
+    if (
+        "apt-get update" in dockerfile_text
+        and "apt-get update &&" not in dockerfile_text
+    ):
+        assessment["failed"].append(
+            {
+                "id": "4.7",
+                "title": "Do not use update instructions alone",
+                "description": "Combine update and install in single RUN instruction.",
+                "severity": "LOW",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.7",
+                "title": "Do not use update instructions alone",
+                "description": "Updates and installs appear to be combined properly.",
+                "severity": "LOW",
+            }
+        )
+
+    # 4.8 Remove setuid and setgid permissions
+    if "chmod -R" in dockerfile_text and "find / -perm" in dockerfile_text:
+        assessment["passed"].append(
+            {
+                "id": "4.8",
+                "title": "Remove setuid and setgid permissions",
+                "description": "Removing unnecessary setuid binaries reduces privilege escalation risks.",
+                "severity": "HIGH",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.8",
+                "title": "Remove setuid and setgid permissions",
+                "description": "Consider removing setuid/setgid from binaries not required by app.",
+                "severity": "HIGH",
+            }
+        )
+
+    # 4.9 Use COPY instead of ADD
+    if "ADD" in dockerfile_text:
+        assessment["failed"].append(
+            {
+                "id": "4.9",
+                "title": "Use COPY instead of ADD",
+                "description": "COPY is more transparent than ADD and should be preferred.",
+                "severity": "LOW",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.9",
+                "title": "Use COPY instead of ADD",
+                "description": "COPY is being used properly instead of ADD.",
+                "severity": "LOW",
+            }
+        )
+
+    # 4.10 Do not store secrets in Dockerfiles
+    has_possible_secrets = any(
+        pattern in dockerfile_text.lower()
+        for pattern in ["password", "secret", "key", "token", "auth", "cred"]
+    )
+    if has_possible_secrets:
+        assessment["failed"].append(
+            {
+                "id": "4.10",
+                "title": "Do not store secrets in Dockerfiles",
+                "description": "Potential secrets found. Use build args, environment variables, or secret management.",
+                "severity": "CRITICAL",
+            }
+        )
+    else:
+        assessment["passed"].append(
+            {
+                "id": "4.10",
+                "title": "Do not store secrets in Dockerfiles",
+                "description": "No obvious secrets detected in Dockerfile.",
+                "severity": "CRITICAL",
+            }
+        )
+
+    # 4.11 Install verified packages
+    if (
+        "apt-get install" in dockerfile_text
+        and "--allow-unauthenticated" not in dockerfile_text
+    ):
+        assessment["passed"].append(
+            {
+                "id": "4.11",
+                "title": "Install verified packages",
+                "description": "Package authenticity appears to be verified during installation.",
+                "severity": "MEDIUM",
+            }
+        )
+    else:
+        assessment["skipped"].append(
+            {
+                "id": "4.11",
+                "title": "Install verified packages",
+                "description": "Ensure packages are verified (avoid --allow-unauthenticated).",
+                "severity": "MEDIUM",
+            }
+        )
+
+    return assessment
+
+
+def main():
+    """Enhanced main function with advanced security analysis features."""
     try:
         dockerfile_path = input("Enter path to Dockerfile: ").strip()
 
@@ -1150,11 +2774,12 @@ if __name__ == "__main__":
             console.print("❌ File not found.", style="bold red")
             exit(1)
 
-        with open(dockerfile_path, "r") as f:
+        with open(dockerfile_path, "r", encoding="utf-8") as f:
             dockerfile_text = f.read()
 
         console.print(
-            "\n🔧 Advanced Dockerfile Optimization Process 🔧", style="bold cyan"
+            "\n🔧 Advanced Dockerfile Optimization and Security Analysis 🔧",
+            style="bold cyan",
         )
         console.print("1️⃣ Validating Dockerfile...", style="cyan")
 
@@ -1165,8 +2790,109 @@ if __name__ == "__main__":
         original_size, optimized_size = enhanced_image_size_estimation(dockerfile_text)
         original_time, optimized_time = enhanced_build_time_estimation(dockerfile_text)
         security_checks = generate_security_checklist(dockerfile_text)
+        env_analysis = analyze_environment_differences(dockerfile_text)
 
-        console.print("2️⃣ Analyzing with Google Gemini AI...", style="cyan")
+        # ADD: Security analysis features
+        escape_risks = analyze_container_escape_risks(dockerfile_text)
+        if escape_risks:
+            console.print("\n⚠️ Container escape risks detected:", style="bold red")
+            for risk in escape_risks:
+                console.print(f"  - {risk['severity']}: {risk['title']}", style="red")
+                console.print(f"    {risk['description']}", style="dim")
+                console.print(
+                    f"    Recommendation: {risk['recommendation']}", style="yellow"
+                )
+
+        # ADD: CIS benchmark assessment
+        cis_assessment = cis_docker_benchmark_assessment(dockerfile_text)
+        passed_count = len(cis_assessment["passed"])
+        failed_count = len(cis_assessment["failed"])
+        total_assessed = passed_count + failed_count
+        if total_assessed > 0:
+            compliance_score = int((passed_count / total_assessed) * 100)
+            console.print(
+                f"\n🔒 CIS Docker Benchmark: {compliance_score}% compliance",
+                style="bold cyan",
+            )
+            console.print(f"  - ✅ Passed: {passed_count} checks", style="green")
+            console.print(f"  - ❌ Failed: {failed_count} checks", style="red")
+            console.print(
+                f"  - ⚠️ Manual review needed: {len(cis_assessment['skipped'])} checks",
+                style="yellow",
+            )
+
+        # Check for possible secrets (new feature)
+        secret_findings = detect_hardcoded_secrets(dockerfile_text)
+        if secret_findings:
+            console.print("\n⚠️ Potential secrets detected:", style="bold yellow")
+            for finding in secret_findings:
+                console.print(
+                    f"  - {finding['type']} at line {finding['line']}", style="yellow"
+                )
+
+            console.print(
+                "\n🔒 Always use secure methods to handle secrets:", style="bold yellow"
+            )
+            console.print("  - Environment variables at runtime", style="yellow")
+            console.print("  - Docker secrets or Kubernetes secrets", style="yellow")
+            console.print(
+                "  - External secret managers (Vault, AWS Secrets Manager, etc.)",
+                style="yellow",
+            )
+
+        # Check for missing healthcheck (new feature)
+        if "HEALTHCHECK" not in dockerfile_text:
+            console.print("\n💡 No HEALTHCHECK instruction found.", style="yellow")
+            response = (
+                input("Would you like to add a healthcheck instruction? (y/n): ")
+                .strip()
+                .lower()
+            )
+            if response == "y":
+                dockerfile_text = add_dockerfile_healthcheck(dockerfile_text)
+                console.print("✅ HEALTHCHECK instruction added.", style="green")
+                if write_file_with_encoding(dockerfile_path, dockerfile_text):
+                    console.print(
+                        "✅ Dockerfile updated with HEALTHCHECK.", style="green"
+                    )
+                else:
+                    console.print(
+                        "⚠️ Could not update Dockerfile with HEALTHCHECK", style="yellow"
+                    )
+
+        # ADD: Ask if user wants a detailed security report
+        console.print(
+            "\n📋 Would you like to generate an enhanced security report? The report includes:",
+            style="bold cyan",
+        )
+        console.print("  - Severity classifications for security issues", style="cyan")
+        console.print("  - Implementation timeline recommendations", style="cyan")
+        console.print("  - Dockerfile-specific remediation examples", style="cyan")
+        console.print("  - CI/CD integration examples", style="cyan")
+        console.print("  - Links to security documentation and tools", style="cyan")
+
+        security_report_response = (
+            input("Generate enhanced security report? (y/n): ").strip().lower()
+        )
+        if security_report_response == "y":
+            security_report = generate_dockerfile_security_report(dockerfile_text)
+            security_report_path = os.path.join(
+                os.path.dirname(dockerfile_path), "dockerfile_security_report.md"
+            )
+            if write_file_with_encoding(security_report_path, security_report):
+                console.print(
+                    f"✅ Enhanced security report generated at {security_report_path}",
+                    style="green",
+                )
+            else:
+                console.print(
+                    "⚠️ Could not write security report due to encoding issues",
+                    style="yellow",
+                )
+
+        console.print("2️⃣ Analyzing with AI...", style="cyan")
+        # Use enhanced prompt generator
+        prompt = enhance_generate_optimization_prompt(dockerfile_text)
         result = optimize_dockerfile(dockerfile_text)
 
         # Display summary metrics in a nice table
@@ -1177,6 +2903,7 @@ if __name__ == "__main__":
             original_time,
             optimized_time,
             security_checks,
+            env_analysis,
         )
 
         console.print("3️⃣ Optimization Complete!", style="bold green")
@@ -1194,6 +2921,57 @@ if __name__ == "__main__":
                 style="yellow",
             )
 
+        # Ask if the user wants to add distroless recommendation (new feature)
+        distroless_base = suggest_distroless_alternative(dockerfile_text)
+        console.print(f"\n💡 Distroless Alternative: {distroless_base}", style="yellow")
+        console.print(
+            "Distroless images reduce attack surface and improve security.",
+            style="yellow",
+        )
+
+        # Offer to add vulnerability scanning comments to Dockerfile (new feature)
+        console.print(
+            "\n💡 Add vulnerability scanning recommendations to your Dockerfile?",
+            style="yellow",
+        )
+        scan_response = (
+            input("Add vulnerability scanning comments? (y/n): ").strip().lower()
+        )
+        if scan_response == "y":
+            with open(dockerfile_path, "r") as f:
+                current_dockerfile = f.read()
+
+            updated_dockerfile = integrate_vulnerability_scanning(current_dockerfile)
+            if write_file_with_encoding(dockerfile_path, updated_dockerfile):
+                console.print(
+                    "✅ Vulnerability scanning comments added.", style="green"
+                )
+            else:
+                console.print(
+                    "⚠️ Could not add vulnerability scanning comments", style="yellow"
+                )
+
+        # ADD: Final security recommendations
+        console.print("\n🚀 Security recommendations:", style="bold green")
+        console.print(
+            "  - Implement image signing with Docker Content Trust or Cosign",
+            style="green",
+        )
+        console.print(
+            "  - Set up automated vulnerability scanning in CI/CD", style="green"
+        )
+        console.print(
+            "  - Generate and verify SBOMs as part of the build process", style="green"
+        )
+        console.print(
+            "  - Consider using distroless images for production", style="green"
+        )
+
     except Exception as e:
         console.print(f"\n⚠️ Optimization Failed: {str(e)}", style="bold red")
         exit(1)
+
+
+# Replace the existing if __name__ == "__main__": block with this enhanced version
+if __name__ == "__main__":
+    main()
