@@ -562,14 +562,37 @@ def analyze_environment_differences(dockerfile_text: str) -> Dict[str, Dict[str,
     return env_analysis
 
 
-def generate_env_optimized_dockerfile(dockerfile_text: str) -> str:
+def generate_env_optimized_dockerfile(
+    dockerfile_text: str, preferred_base: str = "original"
+) -> str:
     """Generate environment-optimized Dockerfile using ARG and multi-stage builds.
 
     This creates a template that uses build args to create either dev or prod builds.
     """
     # Analyze the current Dockerfile
-    base_image_match = re.search(r"FROM\s+([^\s]+)", dockerfile_text)
+    base_image_match = re.search(r"FROM\s+([^\s:]+):?([^\s]*)", dockerfile_text)
     base_image = base_image_match.group(1) if base_image_match else "alpine:3.16"
+    base_tag = (
+        base_image_match.group(2)
+        if base_image_match and base_image_match.group(2)
+        else ""
+    )
+
+    # Extract original image family (node, python, etc)
+    image_family = ""
+    for family in [
+        "node",
+        "python",
+        "golang",
+        "java",
+        "openjdk",
+        "ubuntu",
+        "debian",
+        "alpine",
+    ]:
+        if family in base_image.lower() or family in base_tag.lower():
+            image_family = family
+            break
 
     # Extract WORKDIR if present
     workdir_match = re.search(r"WORKDIR\s+([^\s]+)", dockerfile_text)
@@ -589,6 +612,29 @@ def generate_env_optimized_dockerfile(dockerfile_text: str) -> str:
     # Check if it's a Python application
     is_python = "python" in dockerfile_text.lower() or "pip" in dockerfile_text.lower()
 
+    # Select appropriate base image based on preference
+    node_base = ""
+    python_base = ""
+
+    if preferred_base == "alpine":
+        node_base = "node:16-alpine"
+        python_base = "python:3.9-alpine"
+    elif preferred_base == "slim":
+        node_base = "node:16-slim"
+        python_base = "python:3.9-slim"
+    elif preferred_base == "full":
+        node_base = "node:16"
+        python_base = "python:3.9"
+    else:  # original
+        # Try to preserve original image with version
+        if base_image_match:
+            original_full = f"{base_image}:{base_tag}" if base_tag else base_image
+            node_base = original_full if image_family == "node" else "node:16"
+            python_base = original_full if image_family == "python" else "python:3.9"
+        else:
+            node_base = "node:16"
+            python_base = "python:3.9"
+
     # Create optimized template based on application type
     if is_node:
         return f"""# Optimized Dockerfile with dev/prod environments
@@ -597,7 +643,7 @@ def generate_env_optimized_dockerfile(dockerfile_text: str) -> str:
 # Production: docker build --build-arg ENV=production -t myapp:prod .
 
 # Build stage
-FROM node:16-alpine AS builder
+FROM {node_base} AS builder
 ARG ENV=production
 WORKDIR {workdir}
 
@@ -618,7 +664,7 @@ RUN if [ -f "tsconfig.json" ]; then \\
     fi
 
 # Production stage (smaller image)
-FROM node:16-alpine AS production
+FROM {node_base} AS production
 ARG ENV=production
 WORKDIR {workdir}
 ENV NODE_ENV=$ENV
@@ -634,11 +680,11 @@ COPY --from=builder {workdir}/dist ./dist 2>/dev/null || true
 
 # Add development tools if in dev environment
 RUN if [ "$ENV" = "development" ]; then \\
-      apk add --no-cache vim curl; \\
+      {get_install_command(node_base)} vim curl; \\
     fi
 
 # Create non-root user for security
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+{get_user_creation_command(node_base)}
 USER appuser
 
 # Expose port
@@ -658,14 +704,13 @@ CMD ["npm", "start"]
 # Production: docker build --build-arg ENV=production -t myapp:prod .
 
 # Build stage
-FROM python:3.9-slim AS builder
+FROM {python_base} AS builder
 ARG ENV=production
 WORKDIR {workdir}
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    gcc \\
-    && rm -rf /var/lib/apt/lists/*
+RUN {get_install_command(python_base)} gcc \\
+    && {get_cleanup_command(python_base)}
 
 # Copy requirements first for better caching
 COPY requirements*.txt ./
@@ -679,7 +724,7 @@ RUN if [ "$ENV" = "development" ] && [ -f "requirements-dev.txt" ]; then \\
 COPY . .
 
 # Production stage (smaller image)
-FROM python:3.9-slim AS production
+FROM {python_base} AS production
 ARG ENV=production
 WORKDIR {workdir}
 ENV PYTHONUNBUFFERED=1 \\
@@ -695,14 +740,12 @@ COPY --from=builder {workdir} ./
 
 # Add development tools if in dev environment
 RUN if [ "$ENV" = "development" ]; then \\
-      apt-get update && apt-get install -y --no-install-recommends \\
-        vim \\
-        curl \\
-        && rm -rf /var/lib/apt/lists/*; \\
+      {get_install_command(python_base)} vim curl \\
+      && {get_cleanup_command(python_base)}; \\
     fi
 
 # Create non-root user for security
-RUN groupadd -r appgroup && useradd -r -g appgroup appuser
+{get_user_creation_command(python_base)}
 USER appuser
 
 # Expose port
@@ -723,7 +766,7 @@ CMD ["python", "app.py"]
 # Production: docker build --build-arg ENV=production -t myapp:prod .
 
 # Build stage
-FROM {base_image} AS builder
+FROM {base_image}{':'+base_tag if base_tag else ''} AS builder
 ARG ENV=production
 WORKDIR {workdir}
 
@@ -738,7 +781,7 @@ RUN if [ "$ENV" = "development" ]; then \\
     fi
 
 # Production stage
-FROM {base_image} AS production
+FROM {base_image}{':'+base_tag if base_tag else ''} AS production
 ARG ENV=production
 WORKDIR {workdir}
 
@@ -751,7 +794,7 @@ RUN if [ "$ENV" = "development" ]; then \\
     fi
 
 # Create non-root user for security
-RUN adduser -D appuser
+{get_user_creation_command(base_image)}
 USER appuser
 
 # Expose port
@@ -760,6 +803,48 @@ EXPOSE {expose_port}
 # Start the application
 CMD ["echo", "Application started"]
 """
+
+
+def get_install_command(image_name: str) -> str:
+    """Get the appropriate package installation command based on the image."""
+    if "alpine" in image_name.lower():
+        return "apk add --no-cache"
+    elif (
+        any(x in image_name.lower() for x in ["debian", "ubuntu"])
+        or "slim" in image_name.lower()
+    ):
+        return "apt-get update && apt-get install -y --no-install-recommends"
+    else:
+        # Default to apt-get for unknown images
+        return "apt-get update && apt-get install -y --no-install-recommends"
+
+
+def get_cleanup_command(image_name: str) -> str:
+    """Get the appropriate cleanup command based on the image."""
+    if "alpine" in image_name.lower():
+        return "rm -rf /var/cache/apk/*"
+    elif (
+        any(x in image_name.lower() for x in ["debian", "ubuntu"])
+        or "slim" in image_name.lower()
+    ):
+        return "rm -rf /var/lib/apt/lists/*"
+    else:
+        # Default to apt cleanup for unknown images
+        return "rm -rf /var/lib/apt/lists/*"
+
+
+def get_user_creation_command(image_name: str) -> str:
+    """Get the appropriate user creation command based on the image."""
+    if "alpine" in image_name.lower():
+        return "RUN addgroup -S appgroup && adduser -S appuser -G appgroup"
+    elif (
+        any(x in image_name.lower() for x in ["debian", "ubuntu"])
+        or "slim" in image_name.lower()
+    ):
+        return "RUN groupadd -r appgroup && useradd -r -g appgroup appuser"
+    else:
+        # Default to debian-style for unknown images
+        return "RUN groupadd -r appgroup && useradd -r -g appgroup appuser"
 
 
 def display_summary_table(
@@ -992,7 +1077,7 @@ Dockerfile to analyze:
 """
 
 
-def optimize_dockerfile(dockerfile_text: str) -> str:
+def optimize_dockerfile(dockerfile_text: str, prompt: str = None) -> str:
     """Optimize Dockerfile using an AI provider (Gemini, OpenAI, Claude, or Perplexity)."""
     # Initial validation
     is_valid, issues = validate_dockerfile(dockerfile_text)
@@ -1002,8 +1087,9 @@ def optimize_dockerfile(dockerfile_text: str) -> str:
             console.print(f"  - {issue}", style="red")
         raise ValueError("Dockerfile validation failed")
 
-    # Generate optimized prompt
-    prompt = generate_optimization_prompt(dockerfile_text)
+    # Generate optimized prompt if not provided
+    if prompt is None:
+        prompt = generate_optimization_prompt(dockerfile_text)
 
     # Check for selected provider
     if not selected_provider or not selected_api_key:
@@ -1142,8 +1228,10 @@ def extract_optimized_dockerfile(ai_result: str) -> Optional[str]:
     return None
 
 
-def suggest_distroless_alternative(base_image: str) -> str:
-    """Suggest appropriate distroless image based on the current base image."""
+def suggest_distroless_alternative(
+    base_image: str, preferred_base: str = "original"
+) -> str:
+    """Suggest appropriate distroless image based on the current base image and user preference."""
     distroless_map = {
         "python": "gcr.io/distroless/python3",
         "node": "gcr.io/distroless/nodejs",
@@ -1153,10 +1241,12 @@ def suggest_distroless_alternative(base_image: str) -> str:
         "ubuntu": "gcr.io/distroless/base",
     }
 
+    # If user wants to keep original type, suggest appropriate distroless
     for key, value in distroless_map.items():
         if key in base_image.lower():
             return value
 
+    # If no specific match and not preserving original, use default
     return "gcr.io/distroless/base"
 
 
@@ -1592,7 +1682,9 @@ def add_dockerfile_healthcheck(dockerfile_text: str) -> str:
     )
 
 
-def enhance_generate_optimization_prompt(dockerfile_text: str) -> str:
+def enhance_generate_optimization_prompt(
+    dockerfile_text: str, preferred_base: str = "original"
+) -> str:
     """Enhanced version of generate_optimization_prompt with additional security features."""
     # First call the original function to get the base prompt
     original_prompt = generate_optimization_prompt(dockerfile_text)
@@ -1608,7 +1700,21 @@ def enhance_generate_optimization_prompt(dockerfile_text: str) -> str:
         for finding in secret_findings:
             secrets_section += f"- {finding['type']} found at line {finding['line']}\n"
 
+    # Add base image preference to prompt
+    base_preference_section = f"""
+## 🏗️ Base Image Preference
+Preferred base image type: {preferred_base.upper()}
+
+Please respect this preference when suggesting optimizations. This means:
+- {"Use Alpine-based images where possible" if preferred_base == "alpine" else ""}
+- {"Use slim variants of images where possible" if preferred_base == "slim" else ""}
+- {"Use full-featured base images" if preferred_base == "full" else ""}
+- {"Keep the original base image type" if preferred_base == "original" else ""}
+"""
+
     additional_sections = f"""
+{base_preference_section}
+
 ## 🛡️ Advanced Security Recommendations
 
 ### Distroless Images
@@ -2777,6 +2883,20 @@ def main():
         with open(dockerfile_path, "r", encoding="utf-8") as f:
             dockerfile_text = f.read()
 
+        # ADD THIS: Get base image preference
+        console.print("\n🔧 Base Image Preference", style="bold cyan")
+        base_options = ["alpine", "slim", "full", "original"]
+        console.print(f"Options: {', '.join(base_options)}", style="cyan")
+        preferred_base = (
+            input("Preferred base image type (default: original): ").strip().lower()
+            or "original"
+        )
+        if preferred_base not in base_options:
+            console.print(
+                f"⚠️ Invalid option. Using 'original' instead.", style="yellow"
+            )
+            preferred_base = "original"
+
         console.print(
             "\n🔧 Advanced Dockerfile Optimization and Security Analysis 🔧",
             style="bold cyan",
@@ -2892,8 +3012,8 @@ def main():
 
         console.print("2️⃣ Analyzing with AI...", style="cyan")
         # Use enhanced prompt generator
-        prompt = enhance_generate_optimization_prompt(dockerfile_text)
-        result = optimize_dockerfile(dockerfile_text)
+        prompt = enhance_generate_optimization_prompt(dockerfile_text, preferred_base)
+        result = optimize_dockerfile(dockerfile_text, prompt)
 
         # Display summary metrics in a nice table
         display_summary_table(
@@ -2913,7 +3033,6 @@ def main():
         # Extract optimized Dockerfile content
         optimized_dockerfile = extract_optimized_dockerfile(result)
         if optimized_dockerfile:
-            # Ask user if they want to apply the optimized Dockerfile
             apply_optimized_dockerfile(dockerfile_path, optimized_dockerfile)
         else:
             console.print(
